@@ -2,6 +2,7 @@
 """SSL Monitor - stores state in data.json and history in history.jsonl.
 
 Requires Python 3.8+ and the `cryptography` package.
+SMTP is configured exclusively through environment variables (see SMTP_* below).
 """
 import base64, json, math, os, re, secrets, signal, smtplib, socket, ssl, sys
 import threading, time, traceback
@@ -15,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed448, ed25519, rsa
+from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.x509.oid import NameOID
 
 BASE = Path(__file__).resolve().parent
@@ -23,9 +25,38 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATA_FILE = DATA_DIR / "data.json"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 PUBLIC = BASE / "public"
-PORT = int(os.environ.get("PORT", 3082))
 AUTH_USER = os.environ.get("AUTH_USER")
 AUTH_PASS = os.environ.get("AUTH_PASS")
+MAX_BODY = 1_000_000            # max request body in bytes
+
+
+def _env_int(name, default):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        sys.exit(f"Invalid value for {name}: {raw!r} (expected a number)")
+
+
+PORT = _env_int("PORT", 3082)
+
+# ---------- SMTP (environment only, never stored in data.json) ----------
+SMTP_PORT = _env_int("SMTP_PORT", 587)
+SMTP = {
+    "host": os.environ.get("SMTP_HOST", "").strip(),
+    "port": SMTP_PORT,
+    # starttls = upgrade a plain connection (usually port 587); ssl = implicit TLS (port 465);
+    # none = no encryption (only for a trusted local relay)
+    "security": (os.environ.get("SMTP_SECURITY", "").strip().lower()
+                 or ("ssl" if SMTP_PORT == 465 else "starttls")),
+    "user": os.environ.get("SMTP_USER", "").strip(),
+    "pass": os.environ.get("SMTP_PASS", ""),
+    "from": os.environ.get("SMTP_FROM", "").strip(),
+}
+if SMTP["security"] not in ("starttls", "ssl", "none"):
+    sys.exit("SMTP_SECURITY must be one of: starttls, ssl, none")
 
 LOCK = threading.RLock()        # guards db (data.json)
 HLOCK = threading.Lock()        # guards history.jsonl
@@ -38,10 +69,10 @@ db = {
     "settings": {
         "intervalHours": 24,
         "historyDays": 365,
-        "smtp": {"host": "", "port": 587, "secure": False, "user": "", "pass": "", "from": ""},
     },
 }
 last_mail_error = None
+EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
 class ApiError(Exception):
@@ -76,13 +107,13 @@ def load():
         s = loaded.get("settings", {})
         db["settings"]["intervalHours"] = s.get("intervalHours", 24)
         db["settings"]["historyDays"] = s.get("historyDays", 365)
-        db["settings"]["smtp"].update(s.get("smtp", {}))
+        # Note: an old "smtp" block in settings is intentionally ignored (SMTP is env-only)
     except Exception as e:
         print("Could not read data.json:", e, flush=True)
 
 
 def save():
-    """Atomic write: write to a temp file, then rename. File mode 600 (contains SMTP password)."""
+    """Atomic write: write to a temp file, then rename. File mode 600."""
     with LOCK:
         tmp = DATA_FILE.with_suffix(".json.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -93,6 +124,31 @@ def save():
 
 def new_id():
     return secrets.token_hex(6)
+
+
+# ---------- Domain helpers ----------
+def is_upload(d):
+    return d.get("source") == "upload"
+
+
+def label_of(d):
+    return f"{d['host']} (uploaded certificate)" if is_upload(d) else f"{d['host']}:{d['port']}"
+
+
+def public_domain(d):
+    """Domain without the stored PEM (keeps API responses small)."""
+    return {k: v for k, v in d.items() if k != "cert"}
+
+
+def find_domain(domain_id):
+    return next((d for d in db["domains"] if d["id"] == domain_id), None)
+
+
+def reset_alarm_state(domain_id):
+    """Forget which alarms were already sent for this domain (e.g. after its target changed)."""
+    with LOCK:
+        for a in db["alarms"]:
+            a.get("sent", {}).pop(domain_id, None)
 
 
 # ---------- Storage: history.jsonl ----------
@@ -189,7 +245,7 @@ def search_history(q=None, domain_id=None, status=None, type_=None,
     return {"total": total, "items": items}
 
 
-# ---------- Certificate check ----------
+# ---------- Certificate parsing ----------
 def _err_name(e):
     if isinstance(e, (socket.timeout, TimeoutError)):
         return "Connection timed out"
@@ -247,6 +303,102 @@ def _key_info(cert):
     return type(pub).__name__, None
 
 
+def describe_cert(cert):
+    """Turn an x509.Certificate into the dict stored as a check result."""
+    valid_from = _utc(cert, "not_valid_before")
+    valid_to = _utc(cert, "not_valid_after")
+    issuer = (_attr(cert.issuer, NameOID.ORGANIZATION_NAME)
+              or _attr(cert.issuer, NameOID.COMMON_NAME))
+
+    try:
+        ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        sans = [f"DNS:{n}" for n in ext.get_values_for_type(x509.DNSName)]
+        sans += [f"IP:{addr}" for addr in ext.get_values_for_type(x509.IPAddress)]
+    except x509.ExtensionNotFound:
+        sans = []
+
+    try:
+        eku = [_oid_name(o) for o in
+               cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value]
+    except x509.ExtensionNotFound:
+        eku = []
+
+    try:
+        is_ca = bool(cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
+    except x509.ExtensionNotFound:
+        is_ca = False
+
+    key_type, key_size = _key_info(cert)
+    days_left = math.floor((valid_to - datetime.now(timezone.utc)).total_seconds() / 86400)
+    return {
+        "validFrom": valid_from.isoformat().replace("+00:00", "Z"),
+        "validTo": valid_to.isoformat().replace("+00:00", "Z"),
+        "daysLeft": days_left,
+        "subject": _attr(cert.subject, NameOID.COMMON_NAME),
+        "issuer": issuer,
+        "san": ", ".join(sans),
+        "subjectDn": cert.subject.rfc4514_string(),
+        "issuerDn": cert.issuer.rfc4514_string(),
+        "serial": _serial(cert.serial_number),
+        "sha256": _hex_colon(cert.fingerprint(hashes.SHA256())),
+        "sha1": _hex_colon(cert.fingerprint(hashes.SHA1())),
+        "sigAlg": _oid_name(cert.signature_algorithm_oid),
+        "keyType": key_type,
+        "keySize": key_size,
+        "version": cert.version.name,
+        "isCA": is_ca,
+        "eku": eku,
+        "sans": sans,
+    }
+
+
+# ---------- Uploaded certificates ----------
+PEM_RE = re.compile(r"-----BEGIN (?:X509 )?CERTIFICATE-----.+?-----END (?:X509 )?CERTIFICATE-----", re.S)
+
+
+def parse_certificate_input(text):
+    """Accepts PEM text (first certificate is used) or base64-encoded DER. Returns x509.Certificate."""
+    text = (text or "").strip()
+    if not text:
+        raise ApiError("No certificate provided")
+    if "PRIVATE KEY" in text:
+        raise ApiError("This looks like a private key. Never upload private keys, only the certificate")
+    try:
+        m = PEM_RE.search(text)
+        if m:
+            return x509.load_pem_x509_certificate(m.group(0).encode())
+        if "-----BEGIN" in text:
+            raise ApiError("No certificate found in the PEM text")
+        der = base64.b64decode(re.sub(r"\s+", "", text), validate=True)
+        return x509.load_der_x509_certificate(der)
+    except ApiError:
+        raise
+    except Exception:
+        raise ApiError("Could not read the certificate. Provide PEM text or a .cer/.crt/.pem/.der file")
+
+
+def read_uploaded(text):
+    """Returns (normalized PEM, default display name)."""
+    cert = parse_certificate_input(text)
+    try:
+        info = describe_cert(cert)
+    except Exception as e:
+        raise ApiError(f"Could not read the certificate: {e}")
+    first_san = info["sans"][0].split(":", 1)[1] if info["sans"] else ""
+    name = info["subject"] or first_san or "certificate"
+    return cert.public_bytes(Encoding.PEM).decode(), name
+
+
+def inspect_uploaded(pem):
+    """Re-evaluate a stored certificate (no network). Trust cannot be verified, so authorized is None."""
+    try:
+        info = describe_cert(x509.load_pem_x509_certificate(pem.encode()))
+    except Exception as e:
+        return {"error": f"Could not parse certificate: {e}"}
+    return {"error": None, **info, "authorized": None, "authError": None}
+
+
+# ---------- Network check ----------
 def check_cert(host, port=443, timeout=10):
     # 1) Connect without verification, so expired/invalid certificates can still be read
     try:
@@ -267,48 +419,9 @@ def check_cert(host, port=443, timeout=10):
     if not der:
         return {"error": "No certificate received"}
 
-    # 2) Parse the certificate with cryptography
+    # 2) Parse the certificate
     try:
-        cert = x509.load_der_x509_certificate(der)
-        valid_from = _utc(cert, "not_valid_before")
-        valid_to = _utc(cert, "not_valid_after")
-        issuer = (_attr(cert.issuer, NameOID.ORGANIZATION_NAME)
-                  or _attr(cert.issuer, NameOID.COMMON_NAME))
-
-        try:
-            ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-            sans = [f"DNS:{n}" for n in ext.get_values_for_type(x509.DNSName)]
-            sans += [f"IP:{addr}" for addr in ext.get_values_for_type(x509.IPAddress)]
-        except x509.ExtensionNotFound:
-            sans = []
-
-        try:
-            eku = [_oid_name(o) for o in
-                   cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value]
-        except x509.ExtensionNotFound:
-            eku = []
-
-        try:
-            is_ca = bool(cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
-        except x509.ExtensionNotFound:
-            is_ca = False
-
-        key_type, key_size = _key_info(cert)
-        details = {
-            "subjectDn": cert.subject.rfc4514_string(),
-            "issuerDn": cert.issuer.rfc4514_string(),
-            "serial": _serial(cert.serial_number),
-            "sha256": _hex_colon(cert.fingerprint(hashes.SHA256())),
-            "sha1": _hex_colon(cert.fingerprint(hashes.SHA1())),
-            "sigAlg": _oid_name(cert.signature_algorithm_oid),
-            "keyType": key_type,
-            "keySize": key_size,
-            "version": cert.version.name,
-            "isCA": is_ca,
-            "eku": eku,
-            "sans": sans,
-        }
-        subject = _attr(cert.subject, NameOID.COMMON_NAME)
+        info = describe_cert(x509.load_der_x509_certificate(der))
     except Exception as e:
         return {"error": f"Could not parse certificate: {e}"}
 
@@ -324,15 +437,9 @@ def check_cert(host, port=443, timeout=10):
     except Exception:
         pass
 
-    days_left = math.floor((valid_to - datetime.now(timezone.utc)).total_seconds() / 86400)
     return {
         "error": None,
-        "validFrom": valid_from.isoformat().replace("+00:00", "Z"),
-        "validTo": valid_to.isoformat().replace("+00:00", "Z"),
-        "daysLeft": days_left,
-        "subject": subject,
-        "issuer": issuer,
-        "san": ", ".join(sans),
+        **info,
         "protocol": protocol,
         "cipher": cipher[0] if cipher else None,
         "cipherBits": cipher[2] if cipher else None,
@@ -340,7 +447,6 @@ def check_cert(host, port=443, timeout=10):
         "responseMs": response_ms,
         "authorized": authorized,
         "authError": auth_error,
-        **details,
     }
 
 
@@ -349,7 +455,7 @@ def compute_status(r):
         return "error"
     if r["daysLeft"] < 0:
         return "expired"
-    if not r["authorized"]:
+    if r.get("authorized") is False:         # None = unknown (uploaded certificate)
         return "invalid"
     if r["daysLeft"] <= 7:
         return "critical"
@@ -359,31 +465,47 @@ def compute_status(r):
 
 
 # ---------- Email ----------
+def smtp_public():
+    """Read-only view of the SMTP configuration (never includes the password)."""
+    return {
+        "configured": bool(SMTP["host"]),
+        "host": SMTP["host"],
+        "port": SMTP["port"],
+        "security": SMTP["security"],
+        "user": SMTP["user"],
+        "from": SMTP["from"] or SMTP["user"],
+    }
+
+
 def send_mail(to, subject, text):
-    with LOCK:
-        s = dict(db["settings"]["smtp"])
+    s = SMTP
     if not s["host"]:
-        raise ApiError("SMTP is not configured yet")
+        raise ApiError("SMTP is not configured. Set SMTP_HOST (and related variables) in .env")
+    sender = s["from"] or s["user"]
+    if not sender:
+        raise ApiError("No sender address. Set SMTP_FROM in .env")
     if not to:
         raise ApiError("No recipient provided")
     msg = EmailMessage()
-    msg["From"] = s["from"] or s["user"]
+    msg["From"] = sender
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(text)
-    port = int(s["port"] or 587)
-    if s["secure"]:
-        server = smtplib.SMTP_SSL(s["host"], port, timeout=20)
-    else:
-        server = smtplib.SMTP(s["host"], port, timeout=20)
-        server.ehlo()
-        if server.has_extn("starttls"):
-            server.starttls(context=ssl.create_default_context())
-            server.ehlo()
-    with server:
-        if s["user"]:
-            server.login(s["user"], s["pass"])
-        server.send_message(msg)
+    try:
+        if s["security"] == "ssl":
+            server = smtplib.SMTP_SSL(s["host"], s["port"], timeout=20,
+                                      context=ssl.create_default_context())
+        else:
+            server = smtplib.SMTP(s["host"], s["port"], timeout=20)
+        with server:
+            if s["security"] == "starttls":
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+            if s["user"]:
+                server.login(s["user"], s["pass"])
+            server.send_message(msg)
+    except (smtplib.SMTPException, OSError) as e:
+        raise ApiError(f"Sending failed: {_err_name(e)}")
 
 
 def fmt_local(iso):
@@ -399,7 +521,7 @@ def evaluate_alarms(domain):
             r = domain.get("last")
             if not r:
                 return
-            label = f"{domain['host']}:{domain['port']}"
+            label = label_of(domain)
             for a in db["alarms"]:
                 if a["domainId"] != "all" and a["domainId"] != domain["id"]:
                     continue
@@ -408,7 +530,7 @@ def evaluate_alarms(domain):
 
                 if r.get("error"):
                     key = "error"
-                    subject = f"[SSL] {label} is unreachable"
+                    subject = f"[SSL] {label} could not be checked"
                     text = f"The certificate of {label} could not be checked.\nError: {r['error']}"
                 elif r["daysLeft"] <= a["days"]:
                     key = "exp:" + r["validTo"]
@@ -418,7 +540,7 @@ def evaluate_alarms(domain):
                     text = (f"Domain: {label}\nExpires on: {fmt_local(r['validTo'])}\n"
                             f"Days left: {n}\nIssuer: {r['issuer']}\n"
                             f"Alarm threshold: {a['days']} days")
-                elif not r["authorized"]:
+                elif r.get("authorized") is False:
                     key = "invalid:" + str(r["authError"])
                     subject = f"[SSL] Certificate of {label} is invalid"
                     text = f"Domain: {label}\nProblem: {r['authError']}"
@@ -432,7 +554,8 @@ def evaluate_alarms(domain):
 
         for a, email, key, subject, text in todo:
             entry = {"type": "alarm", "t": now_iso(), "domainId": domain["id"],
-                     "host": domain["host"], "port": domain["port"],
+                     "host": domain["host"], "port": domain.get("port"),
+                     "source": "upload" if is_upload(domain) else None,
                      "email": email, "mailSubject": subject}
             try:
                 send_mail(email, subject, text)
@@ -454,15 +577,18 @@ def evaluate_alarms(domain):
 def run_check(domain):
     with LOCK:
         IN_PROGRESS.add(domain["id"])
+        upload = is_upload(domain)
+        host, port, pem = domain["host"], domain.get("port"), domain.get("cert")
     try:
-        result = check_cert(domain["host"], domain["port"])      # network I/O outside the lock
+        result = inspect_uploaded(pem) if upload else check_cert(host, port)   # network I/O outside the lock
         result["status"] = compute_status(result)
         result["checkedAt"] = now_iso()
         with LOCK:
             domain["last"] = result
         append_history({
             "type": "check", "t": result["checkedAt"],
-            "domainId": domain["id"], "host": domain["host"], "port": domain["port"],
+            "domainId": domain["id"], "host": host, "port": port,
+            "source": "upload" if upload else None,
             "status": result["status"], "daysLeft": result.get("daysLeft"),
             "error": result.get("error"), "authError": result.get("authError"),
             "validTo": result.get("validTo"), "issuer": result.get("issuer"),
@@ -531,12 +657,9 @@ def scheduler():
 
 # ---------- API ----------
 def safe_settings():
-    s = db["settings"]["smtp"]
     return {
         "intervalHours": db["settings"]["intervalHours"],
         "historyDays": db["settings"]["historyDays"],
-        "smtp": {"host": s["host"], "port": s["port"], "secure": s["secure"],
-                 "user": s["user"], "from": s["from"], "passSet": bool(s["pass"])},
     }
 
 
@@ -554,17 +677,24 @@ def parse_target(raw):
     return host, port
 
 
-def find_domain(domain_id):
-    return next((d for d in db["domains"] if d["id"] == domain_id), None)
+def network_duplicate(host, port, exclude=None):
+    return any(d is not exclude and not is_upload(d) and d["host"] == host and d["port"] == port
+               for d in db["domains"])
+
+
+def upload_duplicate(name, exclude=None):
+    return any(d is not exclude and is_upload(d) and d["host"].lower() == name.lower()
+               for d in db["domains"])
 
 
 def route(method, path, body, query):
     if method == "GET" and path == "/api/state":
         with LOCK:
             return {
-                "domains": db["domains"],
+                "domains": [public_domain(d) for d in db["domains"]],
                 "alarms": [{k: v for k, v in a.items() if k != "sent"} for a in db["alarms"]],
                 "settings": safe_settings(),
+                "smtp": smtp_public(),
                 "lastMailError": last_mail_error,
             }
 
@@ -580,19 +710,63 @@ def route(method, path, body, query):
             date_to=norm_iso(query["to"]) if query.get("to") else None,
             limit=limit, offset=offset)
 
+    # --- add a domain (network) or an uploaded certificate ---
     if method == "POST" and path == "/api/domains":
-        host, port = parse_target(body.get("url"))
-        with LOCK:
-            if any(d["host"] == host and d["port"] == port for d in db["domains"]):
-                raise ApiError("This domain is already in the list")
-            domain = {"id": new_id(), "host": host, "port": port,
-                      "addedAt": now_iso(), "last": None}
-            db["domains"].append(domain)
+        if body.get("source") == "upload":
+            pem, default_name = read_uploaded(body.get("certificate"))
+            name = (body.get("name") or "").strip()[:200] or default_name
+            with LOCK:
+                if upload_duplicate(name):
+                    raise ApiError("An uploaded certificate with this name already exists")
+                domain = {"id": new_id(), "source": "upload", "host": name, "port": None,
+                          "cert": pem, "addedAt": now_iso(), "last": None}
+                db["domains"].append(domain)
+        else:
+            host, port = parse_target(body.get("url"))
+            with LOCK:
+                if network_duplicate(host, port):
+                    raise ApiError("This domain is already in the list")
+                domain = {"id": new_id(), "source": "network", "host": host, "port": port,
+                          "addedAt": now_iso(), "last": None}
+                db["domains"].append(domain)
         run_check(domain)
         save()
-        return domain
+        return public_domain(domain)
 
     m = re.fullmatch(r"/api/domains/(\w+)", path)
+
+    # --- edit ---
+    if m and method == "PUT":
+        domain_id = m.group(1)
+        with LOCK:
+            d = find_domain(domain_id)
+        if not d:
+            raise ApiError("Not found", 404)
+        if is_upload(d):
+            name = (body.get("name") or "").strip()[:200] or d["host"]
+            new_pem = None
+            if (body.get("certificate") or "").strip():
+                new_pem, _ = read_uploaded(body["certificate"])
+            with LOCK:
+                if upload_duplicate(name, exclude=d):
+                    raise ApiError("An uploaded certificate with this name already exists")
+                d["host"] = name
+                if new_pem and new_pem != d.get("cert"):
+                    d["cert"] = new_pem
+                    reset_alarm_state(domain_id)
+        else:
+            host, port = parse_target(body.get("url"))
+            with LOCK:
+                if network_duplicate(host, port, exclude=d):
+                    raise ApiError("This domain is already in the list")
+                if (host, port) != (d["host"], d["port"]):
+                    d["host"], d["port"] = host, port
+                    reset_alarm_state(domain_id)
+        run_check(d)
+        save()
+        return public_domain(d)
+
+    # --- delete ---
     if m and method == "DELETE":
         domain_id = m.group(1)
         with LOCK:
@@ -611,15 +785,15 @@ def route(method, path, body, query):
             raise ApiError("Not found", 404)
         run_check(d)
         save()
-        return d
+        return public_domain(d)
 
     if method == "POST" and path == "/api/check-all":
         check_all()
         return {"ok": True}
 
     if method == "POST" and path == "/api/alarms":
-        email = body.get("email") or ""
-        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        email = (body.get("email") or "").strip()
+        if not EMAIL_RE.fullmatch(email):
             raise ApiError("Invalid email address")
         try:
             days = float(body.get("days"))
@@ -652,18 +826,9 @@ def route(method, path, body, query):
         save()
         return {"ok": True}
 
+    # Only check interval and history retention; SMTP is environment-only
     if method == "PUT" and path == "/api/settings":
         with LOCK:
-            smtp = body.get("smtp") or {}
-            old = db["settings"]["smtp"]
-            db["settings"]["smtp"] = {
-                "host": str(smtp.get("host", "")).strip(),
-                "port": int(smtp.get("port") or 587),
-                "secure": bool(smtp.get("secure")),
-                "user": str(smtp.get("user", "")).strip(),
-                "pass": str(smtp["pass"]) if smtp.get("pass") else old["pass"],   # empty = unchanged
-                "from": str(smtp.get("from", "")).strip(),
-            }
             db["settings"]["intervalHours"] = max(1, int(float(body.get("intervalHours") or 24)))
             days = body.get("historyDays")
             if days not in (None, ""):
@@ -673,8 +838,10 @@ def route(method, path, body, query):
         return result
 
     if method == "POST" and path == "/api/settings/test-email":
-        send_mail(body.get("to", ""), "[SSL Monitor] Test email",
-                  "If you can read this, sending email works.")
+        to = (body.get("to") or "").strip()
+        if not EMAIL_RE.fullmatch(to):
+            raise ApiError("Invalid email address")
+        send_mail(to, "[SSL Monitor] Test email", "If you can read this, sending email works.")
         return {"ok": True}
 
     raise ApiError("Not found", 404)
@@ -731,7 +898,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             query = {k: v[0] for k, v in parse_qs(u.query).items()}
             length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BODY:
+                return self._send(413, {"error": "Request too large"})
             body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+            if not isinstance(body, dict):
+                raise ValueError("JSON object expected")
             result = route(method, u.path, body, query)
             with LOCK:                                   # serialize while nobody is writing
                 payload = json.dumps(result).encode()
@@ -757,5 +928,6 @@ if __name__ == "__main__":
     # As PID 1 in a container, Python ignores SIGTERM by default; exit cleanly instead
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     threading.Thread(target=scheduler, daemon=True).start()
-    print(f"SSL Monitor running on http://localhost:{PORT}  (data: {DATA_DIR})", flush=True)
+    smtp_state = f"{SMTP['host']}:{SMTP['port']} ({SMTP['security']})" if SMTP["host"] else "not configured"
+    print(f"SSL Monitor running on http://localhost:{PORT}  (data: {DATA_DIR}, SMTP: {smtp_state})", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
