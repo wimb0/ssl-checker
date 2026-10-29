@@ -23,7 +23,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATA_FILE = DATA_DIR / "data.json"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 PUBLIC = BASE / "public"
-PORT = int(os.environ.get("PORT", 3000))
+PORT = int(os.environ.get("PORT", 3082))
 AUTH_USER = os.environ.get("AUTH_USER")
 AUTH_PASS = os.environ.get("AUTH_PASS")
 
