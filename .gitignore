@@ -1,0 +1,5 @@
+.env
+data.json
+history.jsonl
+*.tmp
+__pycache__/
