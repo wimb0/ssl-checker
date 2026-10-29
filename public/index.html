@@ -21,7 +21,7 @@
   .stat .n { font-size:28px; font-weight:700; }
   .stat .l { color:var(--muted); font-size:13px; }
   form.row, .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-  input, select { padding:9px 11px; border:1px solid var(--border); border-radius:7px; font-size:14px; background:#fff; }
+  input, select, textarea { padding:9px 11px; border:1px solid var(--border); border-radius:7px; font-size:14px; background:#fff; }
   input[type=text], input[type=email], input[type=password], input[type=number] { min-width:0; }
   input.grow { flex:1; min-width:220px; }
   button { padding:9px 14px; border:0; border-radius:7px; background:var(--primary); color:#fff; font-size:14px; cursor:pointer; }
@@ -40,9 +40,12 @@
   .actions { display:flex; gap:6px; justify-content:flex-end; }
   .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
   .grid2 label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
-  .grid2 label.chk { flex-direction:row; align-items:center; gap:8px; }
   .empty { text-align:center; color:var(--muted); padding:24px; }
   .alert { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; padding:10px 14px; border-radius:8px; margin-bottom:12px; font-size:14px; }
+  .info { padding:10px 14px; border-radius:8px; font-size:14px; margin-bottom:14px; }
+  .info.ok { background:#f0fdf4; border:1px solid #bbf7d0; color:#166534; }
+  .info.warn { background:#fffbeb; border:1px solid #fde68a; color:#92400e; }
+  code { background:#f3f4f6; border-radius:4px; padding:1px 5px; font-size:12px; }
   #toast { position:fixed; bottom:20px; right:20px; background:#111827; color:#fff; padding:12px 18px; border-radius:8px; opacity:0; transition:.3s; pointer-events:none; max-width:360px; z-index:1000; }
   #toast.show { opacity:1; } #toast.err { background:var(--crit); }
 
@@ -54,11 +57,15 @@
   td.nowrap { white-space:nowrap; }
   .type { font-size:12px; color:var(--muted); }
 
-  /* Detail dialog */
+  /* Dialogs */
   dialog { border:0; border-radius:12px; padding:24px; max-width:760px; width:94%; max-height:90vh; overflow:auto; }
   dialog::backdrop { background:rgba(0,0,0,.45); }
   dialog h2 { margin:0 0 4px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   dialog h3 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:20px 0 6px; padding-bottom:4px; border-bottom:1px solid var(--border); }
+  #editor { max-width:560px; }
+  .field { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); margin-top:12px; }
+  .field input, .field textarea { color:var(--text); width:100%; }
+  textarea { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; resize:vertical; }
   dl { display:grid; grid-template-columns:170px 1fr; gap:7px 12px; font-size:14px; margin:0; }
   dt { color:var(--muted); } dd { margin:0; word-break:break-word; }
   .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; word-break:break-all; }
@@ -91,6 +98,7 @@
     <form class="row" id="addForm">
       <input type="text" id="newUrl" class="grow" placeholder="e.g. example.com or https://example.com:8443" required>
       <button type="submit">➕ Add</button>
+      <button type="button" class="secondary" id="uploadBtn">📄 Add certificate</button>
       <button type="button" class="secondary" id="checkAllBtn">🔄 Check all now</button>
     </form>
     <div class="muted" id="nextCheck" style="margin-top:10px"></div>
@@ -169,27 +177,29 @@
 
   <section class="card">
     <h2>⚙️ Settings</h2>
+
+    <div id="smtpInfo"></div>
+    <p class="muted" style="margin-top:0">Email (SMTP) is configured with environment variables in <code>.env</code> / <code>docker-compose.yml</code> and cannot be changed here.</p>
+
     <form id="settingsForm">
       <div class="grid2">
-        <label>SMTP server<input type="text" id="smtpHost" placeholder="smtp.example.com"></label>
-        <label>Port<input type="number" id="smtpPort" value="587"></label>
-        <label>Username<input type="text" id="smtpUser" autocomplete="off"></label>
-        <label>Password<input type="password" id="smtpPass" autocomplete="new-password"></label>
-        <label>Sender (From)<input type="text" id="smtpFrom" placeholder="ssl-monitor@example.com"></label>
         <label>Check interval (hours)<input type="number" id="intervalHours" min="1" value="24"></label>
         <label>Keep history (days, 0 = unlimited)<input type="number" id="historyDays" min="0" value="365"></label>
-        <label class="chk"><input type="checkbox" id="smtpSecure"> Direct SSL/TLS (port 465)</label>
       </div>
       <div class="row" style="margin-top:14px">
         <button type="submit">💾 Save</button>
-        <input type="email" id="testTo" placeholder="test address" style="width:220px">
-        <button type="button" class="secondary" id="testBtn">✉️ Send test email</button>
       </div>
+    </form>
+
+    <form class="row" id="testForm" style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+      <input type="email" id="testTo" placeholder="test address" style="width:260px" required>
+      <button type="submit" class="secondary" id="testBtn">✉️ Send test email</button>
     </form>
   </section>
 </main>
 
 <dialog id="detail"></dialog>
+<dialog id="editor"></dialog>
 <div id="toast"></div>
 
 <script>
@@ -201,7 +211,7 @@ const fmtDateLong = s => s ? new Date(s).toLocaleString(LOCALE, { dateStyle:'ful
 const LABELS = { ok:'Valid', warning:'Expiring soon', critical:'Critical', expired:'Expired', invalid:'Invalid',
                  error:'Error', pending:'Not checked yet', sent:'Email sent', failed:'Email failed' };
 
-let state = { domains: [], alarms: [], settings: {} };
+let state = { domains: [], alarms: [], settings: {}, smtp: {} };
 
 async function api(path, method = 'GET', body) {
   const res = await fetch('/api' + path, {
@@ -236,6 +246,10 @@ async function copyText(text) {
   toast('Copied');
 }
 
+const isUpload = d => d.source === 'upload';
+const label = d => isUpload(d) ? d.host : d.host + (d.port !== 443 ? ':' + d.port : '');
+const sourceTag = d => isUpload(d) ? ' <span class="tag">uploaded</span>' : '';
+const histLabel = h => h.source === 'upload' ? h.host : h.host + ((h.port && h.port !== 443) ? ':' + h.port : '');
 const statusOf = d => d.last?.status || 'pending';
 const badgeFor = s => `<span class="badge b-${esc(s)}">${esc(LABELS[s] || s)}</span>`;
 const badge = d => badgeFor(statusOf(d));
@@ -260,7 +274,7 @@ function render() {
   $('#domainBody').innerHTML = sorted.length ? sorted.map(d => `
     <tr>
       <td>${badge(d)}</td>
-      <td><strong>${esc(d.host)}</strong>${d.port !== 443 ? ':' + d.port : ''}</td>
+      <td><strong>${esc(label(d))}</strong>${sourceTag(d)}</td>
       <td>${d.last?.validTo ? fmtDate(d.last.validTo) : '–'}</td>
       <td>${d.last?.daysLeft ?? '–'}</td>
       <td class="hide-m">${esc(d.last?.issuer || (d.last?.error ? '' : '–'))}</td>
@@ -268,12 +282,13 @@ function render() {
       <td><div class="actions">
         <button class="small secondary" data-act="check" data-id="${d.id}">Check</button>
         <button class="small secondary" data-act="detail" data-id="${d.id}">Details</button>
+        <button class="small secondary" data-act="edit" data-id="${d.id}">Edit</button>
         <button class="small danger" data-act="del" data-id="${d.id}">✕</button>
       </div></td>
     </tr>`).join('') : `<tr><td colspan="7" class="empty">No domains yet. Add one above.</td></tr>`;
 
   // Domain selects (keep the current selection)
-  const opts = state.domains.map(d => `<option value="${d.id}">${esc(d.host)}:${d.port}</option>`).join('');
+  const opts = state.domains.map(d => `<option value="${d.id}">${esc(label(d))}</option>`).join('');
   fillSelect('#alarmDomain', `<option value="all">All domains</option>` + opts);
   fillSelect('#hDomain', `<option value="">All domains</option>` + opts);
 
@@ -283,13 +298,15 @@ function render() {
     return `<tr>
       <td>${esc(a.email)}</td>
       <td>≤ ${a.days} days</td>
-      <td>${a.domainId === 'all' ? 'All domains' : esc(d ? d.host + ':' + d.port : '?')}</td>
+      <td>${a.domainId === 'all' ? 'All domains' : esc(d ? label(d) : '?')}</td>
       <td><div class="actions"><button class="small danger" data-act="delalarm" data-id="${a.id}">✕</button></div></td>
     </tr>`;
   }).join('') : `<tr><td colspan="4" class="empty">No alarms configured yet.</td></tr>`;
 
   $('#mailErr').innerHTML = state.lastMailError
     ? `<div class="alert">⚠️ Last email error: ${esc(state.lastMailError)}</div>` : '';
+
+  renderSmtp();
 
   // Next automatic check
   const everyH = state.settings.intervalHours || 24;
@@ -302,6 +319,15 @@ function render() {
   if ($('#detail').open) refreshDetail();
 }
 
+function renderSmtp() {
+  const m = state.smtp || {};
+  $('#smtpInfo').innerHTML = m.configured
+    ? `<div class="info ok">✅ SMTP configured: <strong>${esc(m.host)}:${esc(m.port)}</strong> (${esc(m.security)})` +
+      `${m.user ? ' · user ' + esc(m.user) : ''} · from ${esc(m.from || '–')}</div>`
+    : `<div class="info warn">⚠️ SMTP is not configured. Set <code>SMTP_HOST</code> and the related <code>SMTP_*</code> variables in <code>.env</code> and restart the container.</div>`;
+  $('#testBtn').disabled = !m.configured;
+}
+
 function fillSelect(selector, html) {
   const el = $(selector), prev = el.value;
   if (el.dataset.html === html) return;
@@ -310,14 +336,7 @@ function fillSelect(selector, html) {
 }
 
 function fillSettings() {
-  const s = state.settings, m = s.smtp || {};
-  $('#smtpHost').value = m.host || '';
-  $('#smtpPort').value = m.port || 587;
-  $('#smtpUser').value = m.user || '';
-  $('#smtpPass').value = '';
-  $('#smtpPass').placeholder = m.passSet ? '(unchanged)' : '';
-  $('#smtpFrom').value = m.from || '';
-  $('#smtpSecure').checked = !!m.secure;
+  const s = state.settings;
   $('#intervalHours').value = s.intervalHours || 24;
   $('#historyDays').value = s.historyDays ?? 365;
 }
@@ -369,7 +388,7 @@ async function searchHistory(reset = true) {
       <tr>
         <td class="nowrap">${fmtDate(h.t)}</td>
         <td class="type">${h.type === 'alarm' ? '📧 alarm' : 'check'}</td>
-        <td><strong>${esc(h.host)}</strong>${h.port !== 443 ? ':' + h.port : ''}</td>
+        <td><strong>${esc(histLabel(h))}</strong>${h.source === 'upload' ? ' <span class="tag">uploaded</span>' : ''}</td>
         <td>${badgeFor(h.status)}</td>
         <td>${h.daysLeft ?? '–'}</td>
         <td style="word-break:break-word">${histDetails(h)}</td>
@@ -388,7 +407,7 @@ $('#hNext').addEventListener('click', () => { H.offset += H.limit; searchHistory
 ['#hDomain', '#hType', '#hStatus'].forEach(s => $(s).addEventListener('change', () => searchHistory()));
 
 // ---------- Detail dialog ----------
-const row = (label, html) => `<dt>${label}</dt><dd>${html ?? '–'}</dd>`;
+const row = (lbl, html) => `<dt>${lbl}</dt><dd>${html ?? '–'}</dd>`;
 const dash = v => (v === null || v === undefined || v === '') ? '–' : esc(v);
 const mono = v => v ? `<span class="mono">${esc(v)}</span>` : '–';
 const copyLine = v => v
@@ -418,8 +437,17 @@ function validityBar(r) {
     <div class="muted" style="display:flex;justify-content:space-between"><span>${fmtDate(r.validFrom)}</span><span>${pct.toFixed(0)}% elapsed</span><span>${fmtDate(r.validTo)}</span></div>`;
 }
 
+function trustedHtml(d, r) {
+  if (isUpload(d)) return '<span class="tag">Not verified</span> uploaded certificate, no chain available';
+  if (r.error) return '–';
+  return r.authorized
+    ? '<span class="tag good">Yes</span>'
+    : '<span class="tag bad">No</span> ' + esc(r.authError);
+}
+
 function fillDetail(d, items) {
   const r = d.last || {};
+  const up = isUpload(d);
   const hist = items === null ? '<div>Loading…</div>'
     : items.map(h => `
     <div><span>${fmtDate(h.t)}</span>
@@ -433,8 +461,8 @@ function fillDetail(d, items) {
   const ekuHtml = (r.eku && r.eku.length) ? r.eku.map(e => `<span class="tag">${esc(e)}</span>`).join('') : '–';
 
   $('#detail').innerHTML = `
-    <h2>${esc(d.host)}${d.port !== 443 ? ':' + d.port : ''} ${badge(d)}</h2>
-    <div class="muted">Last checked: ${fmtDate(r.checkedAt)}</div>
+    <h2>${esc(label(d))}${sourceTag(d)} ${badge(d)}</h2>
+    <div class="muted">${up ? 'Uploaded certificate, not checked over the network · last evaluated: ' : 'Last checked: '}${fmtDate(r.checkedAt)}</div>
     ${validityBar(r)}
     ${r.error ? `<div class="alert" style="margin-top:14px">Error: ${esc(r.error)}</div>` : ''}
 
@@ -443,9 +471,7 @@ function fillDetail(d, items) {
       ${row('Valid from', r.validFrom ? esc(fmtDateLong(r.validFrom)) : '–')}
       ${row('Valid until', r.validTo ? esc(fmtDateLong(r.validTo)) : '–')}
       ${row('Days remaining', dash(r.daysLeft))}
-      ${row('Trusted', r.error ? '–' : r.authorized
-          ? '<span class="tag good">Yes</span>'
-          : '<span class="tag bad">No</span> ' + esc(r.authError))}
+      ${row('Trusted', trustedHtml(d, r))}
     </dl>
 
     <h3>Certificate</h3>
@@ -471,20 +497,24 @@ function fillDetail(d, items) {
     <h3>Subject alternative names (${sans.length})</h3>
     <dl>${row('SAN', sanHtml)}</dl>
 
+    ${up ? '' : `
     <h3>Connection</h3>
     <dl>
       ${row('IP address', dash(r.ip))}
       ${row('Protocol', dash(r.protocol))}
       ${row('Cipher', r.cipher ? esc(r.cipher) + (r.cipherBits ? ' (' + r.cipherBits + ' bit)' : '') : '–')}
       ${row('Response time (TLS)', r.responseMs != null ? r.responseMs + ' ms' : '–')}
-    </dl>
+    </dl>`}
 
     <h3>Recent checks</h3>
     <div class="hist">${hist || '<div>No history</div>'}</div>
 
     <div class="row" style="margin-top:18px;justify-content:space-between">
       <button class="secondary" id="detailSearch">Search all history →</button>
-      <button class="secondary" id="detailClose">Close</button>
+      <div class="row">
+        <button class="secondary" id="detailEdit">Edit</button>
+        <button class="secondary" id="detailClose">Close</button>
+      </div>
     </div>`;
 }
 
@@ -517,10 +547,107 @@ $('#detail').addEventListener('click', e => {
     searchHistory();
     return $('#histForm').scrollIntoView({ behavior: 'smooth' });
   }
+  if (e.target.closest('#detailEdit')) {
+    const d = state.domains.find(x => x.id === $('#detail').dataset.id);
+    $('#detail').close();
+    if (d) openEditor(isUpload(d) ? 'edit-upload' : 'edit-network', d);
+    return;
+  }
   if (e.target.closest('#detailClose')) return $('#detail').close();
   if (e.target === $('#detail')) $('#detail').close();     // click on the backdrop
 });
 $('#detail').addEventListener('close', () => { delete $('#detail').dataset.id; });
+
+// ---------- Editor dialog (upload certificate / edit entry) ----------
+const E = { mode: null, id: null };
+
+function toBase64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+
+function openEditor(mode, d) {
+  E.mode = mode; E.id = d?.id || null;
+  let fields;
+  if (mode === 'edit-network') {
+    const host = d.host.includes(':') ? `[${d.host}]` : d.host;      // IPv6 literal
+    fields = `
+      <h2>Edit domain</h2>
+      <label class="field">Host or URL
+        <input type="text" id="eUrl" value="${esc(host + (d.port !== 443 ? ':' + d.port : ''))}" required>
+      </label>
+      <p class="muted">Changing the host or port resets the alarm state of this entry and starts a new check.</p>`;
+  } else {
+    const isNew = mode === 'upload-new';
+    fields = `
+      <h2>${isNew ? 'Add certificate' : 'Edit uploaded certificate'}</h2>
+      <label class="field">Name
+        <input type="text" id="eName" value="${esc(d?.host || '')}" placeholder="Leave empty to use the common name of the certificate">
+      </label>
+      <label class="field">Certificate file (.cer, .crt, .pem, .der)
+        <input type="file" id="eFile" accept=".cer,.crt,.pem,.der">
+      </label>
+      <label class="field">Or paste the certificate (PEM)
+        <textarea id="eText" rows="9" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+      </label>
+      <p class="muted">${isNew ? '' : 'Leave the certificate empty to keep the current one. '}Only the public certificate is needed. Never upload a private key. If a chain is pasted, only the first certificate is used. Uploaded certificates are not checked over the network and their trust is not verified.</p>`;
+  }
+  $('#editor').innerHTML = `
+    <form id="editorForm">
+      ${fields}
+      <div class="alert" id="eErr" hidden></div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px">
+        <button type="button" class="secondary" id="eCancel">Cancel</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>`;
+  $('#editor').showModal();
+}
+
+$('#editor').addEventListener('click', e => {
+  if (e.target.id === 'eCancel') $('#editor').close();
+});
+
+// Fill the textarea from a chosen file: PEM files as text, binary (DER) files as base64
+$('#editor').addEventListener('change', async e => {
+  if (e.target.id !== 'eFile' || !e.target.files[0]) return;
+  const f = e.target.files[0];
+  if (f.size > 200 * 1024) {
+    $('#eErr').textContent = 'That file is too large to be a certificate.';
+    $('#eErr').hidden = false;
+    e.target.value = '';
+    return;
+  }
+  $('#eErr').hidden = true;
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  const text = new TextDecoder().decode(bytes);
+  $('#eText').value = text.includes('-----BEGIN') ? text : toBase64(bytes);
+});
+
+$('#editor').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true; $('#eErr').hidden = true;
+  try {
+    if (E.mode === 'edit-network') {
+      await api(`/domains/${E.id}`, 'PUT', { url: $('#eUrl').value });
+    } else if (E.mode === 'edit-upload') {
+      await api(`/domains/${E.id}`, 'PUT', { name: $('#eName').value, certificate: $('#eText').value });
+    } else {
+      await api('/domains', 'POST', { source: 'upload', name: $('#eName').value, certificate: $('#eText').value });
+    }
+    $('#editor').close();
+    toast('Saved');
+    await load(); searchHistory(false);
+  } catch (err) {
+    $('#eErr').textContent = err.message;      // shown inside the dialog (a toast would be hidden behind it)
+    $('#eErr').hidden = false;
+  }
+  btn.disabled = false;
+});
+
+$('#uploadBtn').addEventListener('click', () => openEditor('upload-new'));
 
 // ---------- Events ----------
 $('#addForm').addEventListener('submit', async e => {
@@ -551,8 +678,10 @@ $('#domainBody').addEventListener('click', async e => {
       b.disabled = true; await api(`/domains/${id}/check`, 'POST'); toast('Checked'); await load(); searchHistory(false);
     } else if (b.dataset.act === 'detail') {
       showDetail(d);
+    } else if (b.dataset.act === 'edit') {
+      openEditor(isUpload(d) ? 'edit-upload' : 'edit-network', d);
     } else if (b.dataset.act === 'del') {
-      if (confirm(`Delete ${d.host}? Its alarms will be deleted too. The history is kept.`)) {
+      if (confirm(`Delete ${label(d)}? Its alarms will be deleted too. The history is kept.`)) {
         await api(`/domains/${id}`, 'DELETE'); await load();
       }
     }
@@ -584,27 +713,21 @@ $('#settingsForm').addEventListener('submit', async e => {
   try {
     await api('/settings', 'PUT', {
       intervalHours: $('#intervalHours').value,
-      historyDays: $('#historyDays').value,
-      smtp: {
-        host: $('#smtpHost').value, port: $('#smtpPort').value, secure: $('#smtpSecure').checked,
-        user: $('#smtpUser').value, pass: $('#smtpPass').value, from: $('#smtpFrom').value
-      }
+      historyDays: $('#historyDays').value
     });
     toast('Settings saved');
     await load(true);
   } catch (err) { toast(err.message, true); }
 });
 
-$('#testBtn').addEventListener('click', async () => {
-  const to = $('#testTo').value;
-  if (!to) return toast('Enter a test address', true);
+$('#testForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('#testBtn').disabled = true;
   try {
-    // Save first, so the current form values are used
-    $('#settingsForm').requestSubmit();
-    await new Promise(r => setTimeout(r, 500));
-    await api('/settings/test-email', 'POST', { to });
+    await api('/settings/test-email', 'POST', { to: $('#testTo').value });
     toast('Test email sent ✔');
-  } catch (err) { toast('Sending failed: ' + err.message, true); }
+  } catch (err) { toast(err.message, true); }
+  $('#testBtn').disabled = !state.smtp?.configured;
 });
 
 load(true).then(() => searchHistory());
