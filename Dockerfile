@@ -3,7 +3,7 @@ FROM alpine:3.21
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DATA_DIR=/data \
-    PORT=3000
+    PORT=3082
 
 # python3 and cryptography come from the Alpine repository: available for amd64 and arm64,
 # nothing needs to be compiled and pip is not required.
@@ -19,10 +19,10 @@ COPY public ./public
 
 USER app
 VOLUME /data
-EXPOSE 3000
+EXPOSE 3082
 
 # Generous timeout: a Raspberry Pi Zero 2 W starts Python noticeably slower
 HEALTHCHECK --interval=60s --timeout=10s --start-period=20s --retries=3 \
-  CMD python3 -c "import urllib.request as u; u.urlopen('http://127.0.0.1:3000/healthz', timeout=5)" || exit 1
+  CMD python3 -c "import urllib.request as u; u.urlopen('http://127.0.0.1:3082/healthz', timeout=5)" || exit 1
 
 CMD ["python3", "server.py"]
