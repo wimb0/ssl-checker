@@ -57,7 +57,7 @@ docker compose up -d
 docker compose logs -f
 ```
 
-Open `http://<ip-of-the-device>:3000` (or `http://localhost:3000` on the same machine).
+Open `http://<ip-of-the-device>:3082` (or `http://localhost:3082` on the same machine).
 By default the container only listens on `127.0.0.1`. Set `BIND=0.0.0.0` in `.env` to make it
 reachable from your network.
 
@@ -78,7 +78,7 @@ Gmail and Microsoft 365 require an app password. Use port 587 (STARTTLS), or por
 | `AUTH_PASS` | (required) | Password for the web interface |
 | `TZ` | `Europe/Amsterdam` | Time zone, used for the times in alarm emails |
 | `BIND` | `127.0.0.1` | Address the port listens on at the host; `0.0.0.0` = whole network |
-| `PORT` | `3000` | Port on the host |
+| `PORT` | `3082` | Port on the host |
 
 The check interval, history retention and SMTP settings are configured in the web interface.
 
@@ -187,8 +187,7 @@ sudo systemctl enable --now ssl-monitor
   without a login.
 - The SMTP password is stored unencrypted in `data.json`. Keep the volume private and include it in
   your backup policy.
-- The container runs as a non-root user, with a read-only filesystem, without extra capabilities,
-  and with resource limits.
+- The container runs as a non-root user.
 
 ## Building yourself
 
