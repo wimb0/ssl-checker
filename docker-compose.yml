@@ -1,0 +1,42 @@
+services:
+  ssl-checker:
+    image: ghcr.io/wimb0/ssl-checker:latest
+    # To build locally instead of pulling from GitHub: remove the line above and use:
+    # build: .
+    container_name: ssl-checker
+    restart: unless-stopped
+
+    ports:
+      # Only reachable from the host itself by default (for use behind a reverse proxy).
+      # Set BIND=0.0.0.0 in .env to make it available on your network.
+      - "${BIND:-127.0.0.1}:${PORT:-3000}:3000"
+
+    environment:
+      TZ: ${TZ:-Europe/Amsterdam}
+      AUTH_USER: ${AUTH_USER:?Set AUTH_USER in .env}
+      AUTH_PASS: ${AUTH_PASS:?Set AUTH_PASS in .env}
+
+    volumes:
+      - ssl-checker-data:/data       # data.json + history.jsonl
+
+    # --- minimal resources and extra hardening ---
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: 0.25
+    pids_limit: 128                  # threads count too; 25 parallel checks fit easily
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  ssl-checker-data:
