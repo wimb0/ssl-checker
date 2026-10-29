@@ -4,15 +4,64 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SSL Certificate Monitor</title>
+<script>
+  // Apply the theme before the page is painted, to avoid a flash of the wrong theme
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('theme'); } catch (e) {}
+    if (t !== 'light' && t !== 'dark') {
+      t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
 <style>
   :root {
+    color-scheme: light;
     --bg:#f3f5f9; --card:#fff; --text:#1f2937; --muted:#6b7280; --border:#e5e7eb;
-    --primary:#2563eb; --ok:#16a34a; --warn:#d97706; --crit:#dc2626; --grey:#6b7280;
+    --primary:#2563eb; --grey:#6b7280;
+    /* text/number colours */
+    --ok:#16a34a; --warn:#d97706; --crit:#dc2626;
+    /* solid backgrounds (badges, danger button) with white text on top */
+    --ok-bg:#16a34a; --warn-bg:#d97706; --crit-bg:#dc2626;
+    --input-bg:#fff;
+    --btn2-bg:#e5e7eb; --btn2-text:#111827;
+    --header-bg:#111827;
+    --toast-bg:#111827; --toast-text:#fff;
+    --bar-bg:#e5e7eb;
+    --code-bg:#f3f4f6;
+    --tag-bg:#f3f4f6; --tag-bad-bg:#fee2e2; --tag-bad-text:#991b1b; --tag-good-bg:#dcfce7; --tag-good-text:#166534;
+    --chip-bg:#eef2ff; --chip-text:#3730a3; --chip-ip-bg:#ecfdf5; --chip-ip-text:#065f46;
+    --alert-bg:#fef2f2; --alert-border:#fecaca; --alert-text:#991b1b;
+    --info-ok-bg:#f0fdf4; --info-ok-border:#bbf7d0; --info-ok-text:#166534;
+    --info-warn-bg:#fffbeb; --info-warn-border:#fde68a; --info-warn-text:#92400e;
+    --backdrop:rgba(0,0,0,.45);
+  }
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --bg:#0f172a; --card:#1e293b; --text:#e2e8f0; --muted:#94a3b8; --border:#334155;
+    --primary:#2563eb; --grey:#64748b;
+    --ok:#4ade80; --warn:#fbbf24; --crit:#f87171;
+    --ok-bg:#16a34a; --warn-bg:#d97706; --crit-bg:#dc2626;
+    --input-bg:#0f172a;
+    --btn2-bg:#334155; --btn2-text:#e2e8f0;
+    --header-bg:#020617;
+    --toast-bg:#334155; --toast-text:#f1f5f9;
+    --bar-bg:#334155;
+    --code-bg:#334155;
+    --tag-bg:#334155; --tag-bad-bg:#450a0a; --tag-bad-text:#fecaca; --tag-good-bg:#052e16; --tag-good-text:#86efac;
+    --chip-bg:#312e81; --chip-text:#c7d2fe; --chip-ip-bg:#064e3b; --chip-ip-text:#a7f3d0;
+    --alert-bg:#450a0a; --alert-border:#7f1d1d; --alert-text:#fecaca;
+    --info-ok-bg:#052e16; --info-ok-border:#166534; --info-ok-text:#bbf7d0;
+    --info-warn-bg:#422006; --info-warn-border:#854d0e; --info-warn-text:#fde68a;
+    --backdrop:rgba(0,0,0,.65);
   }
   * { box-sizing:border-box; }
   body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
-  header { background:#111827; color:#fff; padding:16px 24px; display:flex; align-items:center; gap:12px; }
+  header { background:var(--header-bg); color:#fff; padding:16px 24px; display:flex; align-items:center; gap:12px; }
   header h1 { font-size:20px; margin:0; }
+  #themeBtn { margin-left:auto; background:transparent; border:1px solid rgba(255,255,255,.3); color:#fff; padding:6px 10px; font-size:16px; line-height:1; }
+  #themeBtn:hover { background:rgba(255,255,255,.12); filter:none; }
   main { max-width:1200px; margin:24px auto; padding:0 16px; display:grid; gap:20px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; overflow-x:auto; }
   .card h2 { margin:0 0 14px; font-size:17px; }
@@ -21,33 +70,34 @@
   .stat .n { font-size:28px; font-weight:700; }
   .stat .l { color:var(--muted); font-size:13px; }
   form.row, .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-  input, select, textarea { padding:9px 11px; border:1px solid var(--border); border-radius:7px; font-size:14px; background:#fff; }
+  input, select, textarea { padding:9px 11px; border:1px solid var(--border); border-radius:7px; font-size:14px; background:var(--input-bg); color:var(--text); }
+  input::placeholder, textarea::placeholder { color:var(--muted); opacity:.7; }
   input[type=text], input[type=email], input[type=password], input[type=number] { min-width:0; }
   input.grow { flex:1; min-width:220px; }
   button { padding:9px 14px; border:0; border-radius:7px; background:var(--primary); color:#fff; font-size:14px; cursor:pointer; }
   button:hover { filter:brightness(.92); }
   button:disabled { opacity:.5; cursor:default; }
-  button.secondary { background:#e5e7eb; color:#111827; }
-  button.danger { background:var(--crit); }
+  button.secondary { background:var(--btn2-bg); color:var(--btn2-text); }
+  button.danger { background:var(--crit-bg); }
   button.small { padding:5px 9px; font-size:12px; }
   table { width:100%; border-collapse:collapse; font-size:14px; margin-top:14px; }
   th, td { text-align:left; padding:10px 8px; border-bottom:1px solid var(--border); vertical-align:middle; }
   th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
   .badge { display:inline-block; padding:3px 10px; border-radius:999px; color:#fff; font-size:12px; font-weight:600; white-space:nowrap; }
-  .b-ok { background:var(--ok); } .b-warning { background:var(--warn); } .b-sent { background:var(--primary); }
-  .b-critical, .b-expired, .b-invalid, .b-error, .b-failed { background:var(--crit); } .b-pending { background:var(--grey); }
+  .b-ok { background:var(--ok-bg); } .b-warning { background:var(--warn-bg); } .b-sent { background:var(--primary); }
+  .b-critical, .b-expired, .b-invalid, .b-error, .b-failed { background:var(--crit-bg); } .b-pending { background:var(--grey); }
   .muted { color:var(--muted); font-size:13px; }
   .actions { display:flex; gap:6px; justify-content:flex-end; }
   .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
   .grid2 label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
   .empty { text-align:center; color:var(--muted); padding:24px; }
-  .alert { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; padding:10px 14px; border-radius:8px; margin-bottom:12px; font-size:14px; }
+  .alert { background:var(--alert-bg); border:1px solid var(--alert-border); color:var(--alert-text); padding:10px 14px; border-radius:8px; margin-bottom:12px; font-size:14px; }
   .info { padding:10px 14px; border-radius:8px; font-size:14px; margin-bottom:14px; }
-  .info.ok { background:#f0fdf4; border:1px solid #bbf7d0; color:#166534; }
-  .info.warn { background:#fffbeb; border:1px solid #fde68a; color:#92400e; }
-  code { background:#f3f4f6; border-radius:4px; padding:1px 5px; font-size:12px; }
-  #toast { position:fixed; bottom:20px; right:20px; background:#111827; color:#fff; padding:12px 18px; border-radius:8px; opacity:0; transition:.3s; pointer-events:none; max-width:360px; z-index:1000; }
-  #toast.show { opacity:1; } #toast.err { background:var(--crit); }
+  .info.ok { background:var(--info-ok-bg); border:1px solid var(--info-ok-border); color:var(--info-ok-text); }
+  .info.warn { background:var(--info-warn-bg); border:1px solid var(--info-warn-border); color:var(--info-warn-text); }
+  code { background:var(--code-bg); border-radius:4px; padding:1px 5px; font-size:12px; }
+  #toast { position:fixed; bottom:20px; right:20px; background:var(--toast-bg); color:var(--toast-text); padding:12px 18px; border-radius:8px; opacity:0; transition:.3s; pointer-events:none; max-width:360px; z-index:1000; }
+  #toast.show { opacity:1; } #toast.err { background:var(--crit-bg); color:#fff; }
 
   /* History */
   .filters { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; }
@@ -58,8 +108,8 @@
   .type { font-size:12px; color:var(--muted); }
 
   /* Dialogs */
-  dialog { border:0; border-radius:12px; padding:24px; max-width:760px; width:94%; max-height:90vh; overflow:auto; }
-  dialog::backdrop { background:rgba(0,0,0,.45); }
+  dialog { border:1px solid var(--border); border-radius:12px; padding:24px; max-width:760px; width:94%; max-height:90vh; overflow:auto; background:var(--card); color:var(--text); }
+  dialog::backdrop { background:var(--backdrop); }
   dialog h2 { margin:0 0 4px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   dialog h3 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:20px 0 6px; padding-bottom:4px; border-bottom:1px solid var(--border); }
   #editor { max-width:560px; }
@@ -72,11 +122,11 @@
   .copyline { display:flex; gap:8px; align-items:flex-start; }
   .copyline span { flex:1; }
   .chips { display:flex; flex-wrap:wrap; gap:5px; }
-  .chip { background:#eef2ff; color:#3730a3; border-radius:6px; padding:2px 8px; font-size:12px; }
-  .chip.ip { background:#ecfdf5; color:#065f46; }
-  .tag { display:inline-block; background:#f3f4f6; border-radius:6px; padding:1px 8px; font-size:12px; margin-right:4px; }
-  .tag.bad { background:#fee2e2; color:#991b1b; }
-  .tag.good { background:#dcfce7; color:#166534; }
+  .chip { background:var(--chip-bg); color:var(--chip-text); border-radius:6px; padding:2px 8px; font-size:12px; }
+  .chip.ip { background:var(--chip-ip-bg); color:var(--chip-ip-text); }
+  .tag { display:inline-block; background:var(--tag-bg); border-radius:6px; padding:1px 8px; font-size:12px; margin-right:4px; }
+  .tag.bad { background:var(--tag-bad-bg); color:var(--tag-bad-text); }
+  .tag.good { background:var(--tag-good-bg); color:var(--tag-good-text); }
   .hist { max-height:200px; overflow:auto; font-size:13px; border:1px solid var(--border); border-radius:8px; }
   .hist div { padding:6px 10px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; gap:10px; }
   @media (max-width:800px){ .hide-m { display:none; } dl { grid-template-columns:1fr; gap:2px; } dd { margin-bottom:8px; } }
@@ -86,6 +136,7 @@
 <header>
   <span style="font-size:24px">🔒</span>
   <h1>SSL Certificate Monitor</h1>
+  <button type="button" id="themeBtn" aria-label="Toggle dark mode"></button>
 </header>
 
 <main>
@@ -213,6 +264,28 @@ const LABELS = { ok:'Valid', warning:'Expiring soon', critical:'Critical', expir
 
 let state = { domains: [], alarms: [], settings: {}, smtp: {} };
 
+// ---------- Theme (light / dark) ----------
+const themeBtn = $('#themeBtn');
+const currentTheme = () => document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+
+function applyTheme(theme, persist = false) {
+  document.documentElement.setAttribute('data-theme', theme);
+  themeBtn.textContent = theme === 'dark' ? '☀️' : '🌙';
+  themeBtn.title = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+  if (persist) { try { localStorage.setItem('theme', theme); } catch {} }
+}
+
+applyTheme(currentTheme());
+themeBtn.addEventListener('click', () => applyTheme(currentTheme() === 'dark' ? 'light' : 'dark', true));
+
+// Follow the operating system as long as the user has not chosen a theme manually
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+  let stored = null;
+  try { stored = localStorage.getItem('theme'); } catch {}
+  if (!stored) applyTheme(e.matches ? 'dark' : 'light');
+});
+
+// ---------- API helpers ----------
 async function api(path, method = 'GET', body) {
   const res = await fetch('/api' + path, {
     method,
@@ -432,7 +505,7 @@ function validityBar(r) {
   const a = new Date(r.validFrom).getTime(), b = new Date(r.validTo).getTime();
   const pct = Math.min(100, Math.max(0, (Date.now() - a) / (b - a) * 100));
   const col = r.daysLeft <= 7 ? 'var(--crit)' : r.daysLeft <= 30 ? 'var(--warn)' : 'var(--ok)';
-  return `<div style="background:#e5e7eb;border-radius:999px;height:8px;margin:10px 0 2px;overflow:hidden">
+  return `<div style="background:var(--bar-bg);border-radius:999px;height:8px;margin:10px 0 2px;overflow:hidden">
     <div style="width:${pct.toFixed(1)}%;height:100%;background:${col}"></div></div>
     <div class="muted" style="display:flex;justify-content:space-between"><span>${fmtDate(r.validFrom)}</span><span>${pct.toFixed(0)}% elapsed</span><span>${fmtDate(r.validTo)}</span></div>`;
 }
